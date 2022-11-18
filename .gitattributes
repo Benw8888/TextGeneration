@@ -6,7 +6,6 @@ aitextgen/models--gpt2/blobs/** filter=lfs diff=lfs merge=lfs -text
 *.gitignore filter=lfs diff=lfs merge=lfs -text
 *.iml filter=lfs diff=lfs merge=lfs -text
 *.xml filter=lfs diff=lfs merge=lfs -text
-*.py filter=lfs diff=lfs merge=lfs -text
 /aitextgen/models--gpt2/blobs/10c66461e4c109db5a2196bff4bb59be30396ed8 filter=lfs diff=lfs merge=lfs -text
 /aitextgen/models--gpt2/blobs/7c5d3f4b8b76583b422fcb9189ad6c89d5d97a094541ce8932dce3ecabde1421 filter=lfs diff=lfs merge=lfs -text
 /aitextgen/models--gpt2/refs/main filter=lfs diff=lfs merge=lfs -text

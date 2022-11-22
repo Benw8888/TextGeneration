@@ -28,7 +28,8 @@ class WrapperDataset(Dataset):
         metadata_file_path="fanfics_metadata.csv",
         only_data=False,
         only_label=False,
-        device = torch.device("cuda")
+        device = torch.device("cuda"),
+        line_by_line = False,
     ):
         self.dataset = inner_dataset
         self.block_size = inner_dataset.block_size
@@ -37,6 +38,7 @@ class WrapperDataset(Dataset):
 
         self.only_data = only_data
         self.only_label = only_label
+        self.line_by_line = line_by_line
 
         self.device = device
 

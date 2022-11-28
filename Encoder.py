@@ -31,11 +31,7 @@ class Encoder(pl.LightningModule):
         return optimizer
 
     def training_step(self, batch_inp, step_id):
-        x,y = batch_inp
-        output_pred = self.forward(x)
-        loss = torch.nn.functional.mse_loss(output_pred, y)
-        self.log("train_loss", loss)
-        return loss
+        pass
 
 
 

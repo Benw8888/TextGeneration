@@ -24,7 +24,7 @@ class Encoder(pl.LightningModule):
     def forward(self,x):
         embedded_x = self.embedding(x)
         lstm_outputs, _ = self.lstm(embedded_x.to(torch.float64))
-        return self.linear(lstm_outputs[:,-1])
+        return self.linear(lstm_outputs[:,-1]) # pass final hidden states into the linear module
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters,lr=0.001)

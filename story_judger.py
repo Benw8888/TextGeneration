@@ -5,7 +5,7 @@ import torch.nn as nn
 # Implement story judger
 
 
-class StoryJudger(nn.Module):
+class BaselineStoryJudger(nn.Module):
     """
     Try to make a baseline story-judger using an LSTM.
     """
@@ -25,3 +25,23 @@ class StoryJudger(nn.Module):
         lstm_outputs, _ = self.lstm(embedded_x.to(torch.float64))
         return self.linear(lstm_outputs[:,-1])
         pass
+
+class StoryJudger(nn.Module):
+    """
+    Try to make actual story judger using encoder output, LSTM, linear layer? 
+    """
+    def __init__(self, encoder): # pass in pre-trained encoder
+        super().__init__()
+        # lstm (??) + linear layer
+        self.encoder = encoder
+        output_dim = 768
+        # hidden_dim = 1000
+        # self.lstm = nn.LSTM(output_dim, hidden_dim, num_layers=2, bidirectional=False, dtype=torch.float64, batch_first=True)
+        self.linear = nn.Linear(output_dim, 1, dtype=torch.float64)
+
+
+    def forward(self, x):
+        encoder_outputs = self.encoder(x)
+        # pre_output = self.lstm(paragraph_embeddings)
+        return self.linear(encoder_outputs)
+

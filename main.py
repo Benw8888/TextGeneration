@@ -60,11 +60,12 @@ if __name__ == '__main__':
 
         baseline_pretrained = False
         if baseline_pretrained:
-            with gzip.open('baseline_judger.p', 'rb') as inp:
-                baseline_judger = pickle.load(inp)
-                baseline_judger.lstm.flatten_parameters()
+            with gzip.open('judger.p', 'rb') as inp:
+                judger = pickle.load(inp)
+                judger.lstm.flatten_parameters()
         else:
-            baseline_judger = story_judger.StoryJudger().to(device)
+            # judger = story_judger.BaselineStoryJudger().to(device)
+            judger = story_judger.StoryJudger().to(device)
 
         loss_fn = torch.nn.functional.mse_loss
 
@@ -74,7 +75,7 @@ if __name__ == '__main__':
             total_loss = 0
             for step, (x,y) in enumerate(tqdm(train_dataloader, position=0, leave=True)):
                 optimizer.zero_grad()
-                output_pred = baseline_judger(x.to(device))
+                output_pred = judger(x.to(device))
                 loss = loss_fn(output_pred, y.to(device))
                 loss.backward()
                 optimizer.step()
@@ -91,11 +92,11 @@ if __name__ == '__main__':
                 open_func = gzip.open
             else:
                 open_func = open
-            with open_func("baseline_judger.p", 'wb') as outp:
-                pickle.dump(baseline_judger, outp, -1)
+            with open_func("judger.p", 'wb') as outp:
+                pickle.dump(judger, outp, -1)
 
 
-        print("examining baseline judger: ")
+        print("examining judger: ")
 
 
         print("CALCULATING TEST LOSS: ")
@@ -104,7 +105,7 @@ if __name__ == '__main__':
             total_loss = 0
             cur_step = 0
             for step, (x, y) in enumerate(tqdm(test_dataloader, position=0, leave=True)):
-                output_pred = baseline_judger(x.to(device))
+                output_pred = judger(x.to(device))
                 loss = loss_fn(output_pred, y.to(device))
                 total_loss += torch.mean(loss)
                 cur_step = step

@@ -32,16 +32,16 @@ class StoryJudger(nn.Module):
     """
     def __init__(self, encoder): # pass in pre-trained encoder
         super().__init__()
-        # lstm (??) + linear layer
+        # lstm + linear layer
         self.encoder = encoder
-        output_dim = 768
-        # hidden_dim = 1000
-        # self.lstm = nn.LSTM(output_dim, hidden_dim, num_layers=2, bidirectional=False, dtype=torch.float64, batch_first=True)
-        self.linear = nn.Linear(output_dim, 1, dtype=torch.float64)
+        paragraph_dim = 768
+        hidden_dim = 1000
+        self.lstm = nn.LSTM(paragraph_dim, hidden_dim, num_layers=2, bidirectional=True, dtype=torch.float64, batch_first=True)
+        self.linear = nn.Linear(2*hidden_dim, 1, dtype=torch.float64)
 
 
     def forward(self, x):
-        encoder_outputs = self.encoder(x)
-        # pre_output = self.lstm(paragraph_embeddings)
-        return self.linear(encoder_outputs)
+        paragraph_embeddings = self.encoder(x)
+        pre_output = self.lstm(paragraph_embeddings)
+        return self.linear(pre_output[:, -1])
 

@@ -38,7 +38,7 @@ class PositionalEncoding(nn.Module):
 
 class Generator(nn.Module):
     """
-    Model from "A detailed guide to Pytorch's nn.Transformer() module.", by
+    Model adapted by Eric from "A detailed guide to Pytorch's nn.Transformer() module.", by
     Daniel Melchor: https://medium.com/p/c80afbc9ffb1/
     """
 

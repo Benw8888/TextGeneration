@@ -16,6 +16,7 @@ import gzip
 import WrapperDataset
 import story_judger
 from tqdm import tqdm
+import Encoder
 
 if __name__ == '__main__':
     # load cached dataset, created from create_datasets.py:
@@ -27,23 +28,41 @@ if __name__ == '__main__':
     else:
         device = torch.device("cpu")
 
-    #tokenizer = GPT2TokenizerFast(vocab_file=os.path.join(STATIC_PATH, "gpt2_vocab.json"),
-    #                              merges_file=os.path.join(STATIC_PATH, "gpt2_merges.txt"), padding_side="left")
-    # https://github.com/huggingface/transformers/issues/10202
-    #tokenizer.add_special_tokens({"additional_special_tokens": ["<|endoftext|>"]})
+    tokenizer = GPT2TokenizerFast(vocab_file=os.path.join(STATIC_PATH, "gpt2_vocab.json"),
+                                 merges_file=os.path.join(STATIC_PATH, "gpt2_merges.txt"), padding_side="right")
+    tokenizer.add_special_tokens({"additional_special_tokens": ["<|endoftext|>"]})
 
 
     # CREATE DATASET
 
-    with gzip.open('dataset_list_cache.p', 'rb') as inp:
-        full_dataset = pickle.load(inp)
+    if True:
+        with gzip.open('dataset_list_cache.p', 'rb') as inp:
+            full_dataset = pickle.load(inp)
 
-    wrap_dataset = WrapperDataset.WrapperDataset(full_dataset, only_data=True, device=device)
+        print("Creating Wrapper Dataset")
+        wrap_dataset = WrapperDataset.WrapperDataset(full_dataset, paragraph_split=True, return_label=True, device=device)
 
-    wrap_dataset.dataset.update_story_ids()
+        wrap_dataset.dataset.update_story_ids()
 
-    total_dataset_length = len(wrap_dataset)
-    print("TOTAL DATASET LENGTH: ", total_dataset_length)
+        total_dataset_length = len(wrap_dataset)
+        print("TOTAL DATASET LENGTH: ", total_dataset_length)
+
+        #with gzip.open("wrap_dataset_cache.p", "wb") as f:
+        #    np.save(f, wrap_dataset)
+
+
+    #with gzip.open('wrap_dataset_cache.p', 'rb') as inp:
+    #    wrap_dataset = pickle.load(inp)
+
+    # TEST STORY JUDGER MODEL
+    data_trial = wrap_dataset[100][None,:]
+    print(data_trial.shape)
+    print(data_trial)
+    encoder = Encoder.Encoder()  # will be pretrained in the future
+    storyjudger = story_judger.StoryJudger(encoder)
+    outp = storyjudger(data_trial)
+
+    print(outp)
 
 
     # TRAIN JUDGER MODEL:
@@ -60,12 +79,11 @@ if __name__ == '__main__':
 
         baseline_pretrained = False
         if baseline_pretrained:
-            with gzip.open('judger.p', 'rb') as inp:
-                judger = pickle.load(inp)
-                judger.lstm.flatten_parameters()
+            with gzip.open('baseline_judger.p', 'rb') as inp:
+                baseline_judger = pickle.load(inp)
+                baseline_judger.lstm.flatten_parameters()
         else:
-            # judger = story_judger.BaselineStoryJudger().to(device)
-            judger = story_judger.StoryJudger().to(device)
+            baseline_judger = story_judger.StoryJudger().to(device)
 
         loss_fn = torch.nn.functional.mse_loss
 
@@ -75,7 +93,7 @@ if __name__ == '__main__':
             total_loss = 0
             for step, (x,y) in enumerate(tqdm(train_dataloader, position=0, leave=True)):
                 optimizer.zero_grad()
-                output_pred = judger(x.to(device))
+                output_pred = baseline_judger(x.to(device))
                 loss = loss_fn(output_pred, y.to(device))
                 loss.backward()
                 optimizer.step()
@@ -92,11 +110,11 @@ if __name__ == '__main__':
                 open_func = gzip.open
             else:
                 open_func = open
-            with open_func("judger.p", 'wb') as outp:
-                pickle.dump(judger, outp, -1)
+            with open_func("baseline_judger.p", 'wb') as outp:
+                pickle.dump(baseline_judger, outp, -1)
 
 
-        print("examining judger: ")
+        print("examining baseline judger: ")
 
 
         print("CALCULATING TEST LOSS: ")
@@ -105,7 +123,7 @@ if __name__ == '__main__':
             total_loss = 0
             cur_step = 0
             for step, (x, y) in enumerate(tqdm(test_dataloader, position=0, leave=True)):
-                output_pred = judger(x.to(device))
+                output_pred = baseline_judger(x.to(device))
                 loss = loss_fn(output_pred, y.to(device))
                 total_loss += torch.mean(loss)
                 cur_step = step
@@ -116,33 +134,29 @@ if __name__ == '__main__':
 
         exit()
 
+
+
     #file_name = "fanfics.csv_text_files/94746.txt"
     #new_story = TokenDataset(file_name, tokenizer=tokenizer, padding_side="left")
 
     # create default ai text gen model
-    load_existing = True # turn to true once we already have a model stored on file
+    load_existing = False # turn to true once we already have a model stored on file
     if load_existing:
         ai = aitextgen(model_folder="trained_model4")
     else:
         ai = aitextgen()
 
-    #full_dataset = TokenDataset(file_path="dataset_cache.tar.gz", from_cache=True, )
-    #print(len(full_dataset.tokens)) #892140
-    #print(len(tokenizer.decode(full_dataset.tokens)))
-
     # Train the model! It will save pytorch_model.bin periodically and after completion to the `trained_model` folder.
-    # alreay trained: 6560, 43440
-    ai.train(wrap_dataset, output_dir="trained_model4",batch_size=8, freeze_layers=True, num_layers_freeze=4, num_steps=50000, generate_every=1000, save_every=500, padding_side="right")
+    # alreay trained: 6560, 43440, 50000,
+    print("starting training")
+    ai.train(wrap_dataset, output_dir="trained_model_temp",batch_size=1, freeze_layers=True, num_layers_freeze=4, num_steps=1, generate_every=1000, save_every=500, padding_side="right")
 
+    print("Done Training")
     # Generate text from it!
     #ai.generate(10)
 
     #cuda.cudaDeviceReset()
 
     #ai2.generate(10, prompt="ROMEO:")
-
-
-
-
 
 

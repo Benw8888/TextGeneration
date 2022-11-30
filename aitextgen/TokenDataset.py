@@ -34,13 +34,13 @@ class TokenDatasetList(Dataset):
         self.block_size = block_size
         self.line_by_line = line_by_line
         self.datasets = token_datasets
-        self.lengths = [max(len(self.datasets[i].tokens)-self.block_size,1) for i in range(len(self.datasets))]
 
-        self.cumulative_lengths=[0]*len(self.lengths) # lengths
-        for i in range(len(self.cumulative_lengths)-1):
-            self.cumulative_lengths[i+1] = self.cumulative_lengths[i]+self.lengths[i]
+        self.paragraph_split = False
+        self.lengths = None
+        self.cumulative_lengths = None
+        self.full_length = None
+        self.calculate_cumulative_lengths() # defines self.lengths, self.cumulative_lengths, self.full_length
 
-        self.full_length = self.cumulative_lengths[-1]+self.lengths[-1]
 
         self.story_ids = []
         for i in range(len(token_datasets)):
@@ -49,6 +49,25 @@ class TokenDatasetList(Dataset):
 
         self.ignore_label = ignore_label
 
+    def calculate_cumulative_lengths(self):
+        if self.paragraph_split:
+            self.paragraph_lengths = [[len(paragraph) for paragraph in dataset.tokens] for dataset in self.datasets]
+            self.fiction_lengths = [sum(fiction) for fiction in self.paragraph_lengths]
+
+            # regime of sending one paragraph at a time:
+            self.lengths = [len(paragraph_list) for paragraph_list in self.datasets]  # number paragraphs per fiction
+            self.cumulative_lengths = [0] * len(self.lengths)  # cumulative number of paragraphs before i, exclusive
+            for i in range(len(self.cumulative_lengths) - 1):
+                self.cumulative_lengths[i + 1] = self.cumulative_lengths[i] + self.lengths[i]
+            self.full_length = self.cumulative_lengths[-1] + self.lengths[-1]
+
+            pass
+        else:
+            self.lengths = [len(self.datasets[i].tokens) for i in range(len(self.datasets))]
+            self.cumulative_lengths = [0] * len(self.lengths)  # lengths
+            for i in range(len(self.cumulative_lengths) - 1):
+                self.cumulative_lengths[i + 1] = self.cumulative_lengths[i] + self.lengths[i]
+            self.full_length = self.cumulative_lengths[-1] + self.lengths[-1]
 
     def save(self, cache_destination: str = "dataset_list_cache.p", compress: bool = True):
         if compress:
@@ -87,19 +106,39 @@ class TokenDatasetList(Dataset):
         if item >= self.full_length:
             print("TRIED TOO BIG ITEM")
             return None
-        i=0
+
+        i=0  # find the fiction to pull from
         while i<len(self.datasets)-1 and item>= self.cumulative_lengths[i+1]:
             i+= 1
 
         #first_token = max(0,item-self.block_size-self.cumulative_lengths[i]+1)
         #last_token = item - self.cumulative_lengths[i]+1
 
+        if self.paragraph_split:
+            paragraph_id = item - self.cumulative_lengths[i]
+            extracted_tokens = self.datasets[i].tokens[paragraph_id]
+            pad_needed = self.block_size - len(extracted_tokens)
+            if pad_needed > 0:
+                data_segment = torch.as_tensor(
+                    np.concatenate((extracted_tokens, np.zeros(pad_needed))).astype(np.int64, copy=False),
+                    dtype=torch.long,
+                )
+            else:
+                data_segment = torch.as_tensor(
+                    extracted_tokens.astype(np.int64, copy=False),
+                    dtype=torch.long,
+                )
+            attention_mask = [1]*len(extracted_tokens) + [0]*pad_needed
+            return {'input_ids': data_segment, 'attention_mask': attention_mask, 'story_id': self.story_ids[i]}
+
+
         first_token = item-self.block_size-self.cumulative_lengths[i]
-        extracted_tokens = self.datasets[i].tokens[first_token : first_token+self.block_size]
+        extracted_tokens = self.datasets[i].tokens[max(first_token,0) : first_token+self.block_size]
         pad_needed = self.block_size-len(extracted_tokens)
+        attention_mask = [1] * len(extracted_tokens) + [0] * pad_needed
         if pad_needed>0:
             data_segment = torch.as_tensor(
-                np.concatenate((np.zeros(pad_needed),extracted_tokens)).astype(np.int64, copy=False),
+                np.concatenate((extracted_tokens,np.zeros(pad_needed))).astype(np.int64, copy=False),
                 dtype=torch.long,
             )
         else:
@@ -107,10 +146,11 @@ class TokenDatasetList(Dataset):
                 extracted_tokens.astype(np.int64, copy=False),
                 dtype=torch.long,
             )
-        if self.ignore_label:
-            return data_segment
-        else:
-            return data_segment, self.story_ids[i]
+        # if self.ignore_label:
+        #     return data_segment
+        # else:
+        #     return data_segment, self.story_ids[i]
+        return {'input_ids': data_segment, 'attention_mask': attention_mask, 'story_id': self.story_ids[i]}
 
     def update_story_ids(self):
         self.story_ids = []
@@ -553,3 +593,4 @@ def merge_datasets(datasets: List[TokenDataset], equalize: bool = True) -> Token
             tokenized_texts.extend(dataset.tokens)
 
     return TokenDataset(tokenized_texts=np.array(tokenized_texts), block_size=block_size)
+

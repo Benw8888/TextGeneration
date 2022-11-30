@@ -26,21 +26,27 @@ class WrapperDataset(Dataset):
         self,
         inner_dataset,
         metadata_file_path="fanfics_metadata.csv",
-        only_data=False,
-        only_label=False,
+        return_data=True,
+        return_label=False,
+        return_attention_mask=True,
         device = torch.device("cuda"),
         line_by_line = False,
+        paragraph_split = False,  # If we're doing autoencoding, we split our dataset into paragraphs. This changes a lot
     ):
-        self.dataset = inner_dataset
+        self.dataset = inner_dataset # a TokenDatasetList
         self.block_size = inner_dataset.block_size
         self.metadata_file_path = metadata_file_path
         self.metadata = self.extract_popularities() #     access a fic using wrap_dataset.metadata.loc[[94746]]
 
-        self.only_data = only_data
-        self.only_label = only_label
-        self.line_by_line = line_by_line
+        self.return_data = return_data
+        self.return_label = return_label
+        self.return_attention_mask = return_attention_mask
 
         self.device = device
+        self.paragraph_split = paragraph_split
+
+        if self.paragraph_split:
+            self.extract_paragraphs()
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -57,17 +63,21 @@ class WrapperDataset(Dataset):
         #print(type(kudos))
         return math.log(kudos+1)
 
+
     def __getitem__(self, item: int):
         super_get = self.dataset[item]
-        data = super_get[0]
-        id = super_get[1]
-        score = self.get_score(id)
-        score = float(self.get_score(id))
-        if self.only_label:
-            return score
-        if self.only_data:
-            return data
-        return data, score
+        output = dict()
+        output['input_ids'] = super_get['input_ids']
+        id = super_get['story_id']
+        output['attention_mask'] = super_get['attention_mask']
+
+        #score = self.get_score(id)
+        #score = float(self.get_score(id))
+
+        #output['labels'] = score
+
+        return output["input_ids"]
+
 
     def extract_popularities(self):
         dataframe = pd.read_csv(self.metadata_file_path)
@@ -75,3 +85,42 @@ class WrapperDataset(Dataset):
         dataframeT.columns = dataframeT.iloc[0]
         dataframe = dataframeT.T
         return dataframe
+
+    def extract_paragraphs(self):
+        # for each story in self.dataset, split into paragraphs
+
+        def split_tokens(tokens):
+            """
+            Given a list of tokens, return the first paragraph.
+            Max size 1024
+            """
+            min_length = 29
+            end = min(1023,len(tokens)-1)
+            # try to find newline split: 198
+            while end >= min_length:
+                if tokens[end] != 198:
+                    end -= 1
+                else:
+                    return tokens[:end], end
+            # newline failed, now we just do full length:
+            end = min(1024, len(tokens))
+            return tokens[:end], end
+
+        for sub_dataset in self.dataset.datasets:
+            copy_tokens = sub_dataset.tokens
+            paragraph_list = []
+            i=0
+            while len(copy_tokens)>0:
+                i+= 1
+                if i%1000==0:
+                    print(i)
+                new_paragraph, end_index = split_tokens(copy_tokens)
+                paragraph_list.append(new_paragraph)
+                copy_tokens = copy_tokens[end_index:]
+            sub_dataset.tokens = paragraph_list
+        # modify self.dataset tokens
+
+        self.dataset.paragraph_split = True
+        self.dataset.calculate_cumulative_lengths()  # modify len, modify getitem, modify tokens
+
+        pass

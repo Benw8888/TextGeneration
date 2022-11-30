@@ -134,7 +134,26 @@ if __name__ == '__main__':
 
         exit()
 
+    #TRAIN PARAGRAPH TO PARAGRAPH
+    #RIGHT NOW OUTPUTS VEC TO VEC, MAY NEED TO TWEAK
+    if False:
+        dim_model = 8
 
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        #train_data is array of 9000/batch_size batches, each batch is array of shape batch_size, 2, num_paragraphs + 2 (start and end), dim_model
+        #dim_model is dimension of our paragraph embedding
+        train_data = generatortrain.generate_random_data(9000, dim_model)
+        val_data = generatortrain.generate_random_data(3000, dim_model)
+
+        train_dataloader = generatortrain.batchify_data(train_data)
+        val_dataloader = generatortrain.batchify_data(val_data)
+
+        model = generator.Generator(dim_model=dim_model, num_heads=2, num_encoder_layers=3, num_decoder_layers=3, dropout_p=0.1).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=0.01)
+        loss_fn = nn.MSELoss()
+
+        train_loss_list, validation_loss_list = generatortrain.fit(model, opt, loss_fn, train_dataloader, val_dataloader, 2)
 
     #file_name = "fanfics.csv_text_files/94746.txt"
     #new_story = TokenDataset(file_name, tokenizer=tokenizer, padding_side="left")
@@ -158,5 +177,7 @@ if __name__ == '__main__':
     #cuda.cudaDeviceReset()
 
     #ai2.generate(10, prompt="ROMEO:")
+    
+    
 
 

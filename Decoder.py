@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import os
 import pytorch_lightning as pl
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from typing import Optional, Tuple, Union
@@ -19,8 +20,31 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GPT2Config,
+    GPT2LMHeadModel,
+    GPT2TokenizerFast,
+    PreTrainedTokenizerFast,
+)
+from transformers.models.gpt2.convert_gpt2_original_tf_checkpoint_to_pytorch import (
+    convert_gpt2_checkpoint_to_pytorch,
+)
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+
 
 # Implement gpt2 decoder conditioned on paragraph embedding
+
+config, kwargs = AutoConfig.from_pretrained(
+                "gpt2",
+                return_unused_kwargs=True,
+                trust_remote_code=False,
+                cache_dir="aitextgen",
+            )
+print(config)
+print(config.hidden_size)  # hidden size is 768
 
 
 logger = logging.get_logger(__name__)
@@ -42,9 +66,20 @@ class Decoder(pl.LightningModule):
     """
     Try to make an LSTM encoder
     """
-    def __init__(self, level="paragraph"):
+    def __init__(self, embedding_size = 768, level="paragraph"):
         super().__init__()
-        self.model = GPT2LMHeadModel.frompretrained('gpt2')
+        cache_dir = "aitextgen"
+        #config = os.path.join(cache_dir, f"config_{tf_gpt2}.json")
+        #self.model = GPT2LMHeadModel.from_pretrained(model, config=config)
+
+        self.embedding_size = 768
+        self.model = AutoModelForCausalLM.from_pretrained(
+                "gpt2", cache_dir=cache_dir
+            )
+        # still of type GPT2LMHeadModel
+
+
+        print("using gpt2 model of type: ",type(self.model).__name__)
         self.modify_gpt2()
 
         # create custom modified GPT2LMHeadModel
@@ -55,11 +90,22 @@ class Decoder(pl.LightningModule):
         """
 
         # First, expand weights
+        # expand hidden size from 768 to 768+self.embedding_size
+
+        # We just change first block for now:
+        block_list = self.model.transformer.h
+        block = block_list[0]
+        block.ln_1 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+
+            # Now we need to update block.attn and block.ln_2; also might have to deal with the layer_past stuff (may cause problems?)
+
+            # DANIEL DO THIS ^ Also read modeling_gpt2.GPT2Attention's code
 
 
-        # Now, overwrite forward method
+
+        # Now, overwrite forward methods
         self.model.transformer.forward = self.overwrite_gpt2_forward
-
+        self.model.forward = self.overwrite_gpt2lmhead_forward
 
     def overwrite_gpt2_forward(
         self,
@@ -153,7 +199,8 @@ class Decoder(pl.LightningModule):
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
-        hidden_states = inputs_embeds + position_embeds
+        print("INPUTs EMBEDS SHAPE: ", inputs_embeds.shape)
+        hidden_states = torch.cat((inputs_embeds + position_embeds, paragraph_embedding), dim=-2)
 
         #CONCATENATE THE EMBEDDING ONTO THE END!!!!!
         #hidden_states = hidden_states
@@ -257,6 +304,79 @@ class Decoder(pl.LightningModule):
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
             cross_attentions=all_cross_attentions,
+        )
+
+    def overwrite_gpt2lmhead_forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        conditioned_on = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
+            `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
+            are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        transformer_outputs = self.transformer(
+            paragraph_embedding=conditioned_on,
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        hidden_states = transformer_outputs[0]
+
+        # Set device for model parallelism
+        if self.model_parallel:
+            torch.cuda.set_device(self.transformer.first_device)
+            hidden_states = hidden_states.to(self.lm_head.weight.device)
+
+        lm_logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        if not return_dict:
+            output = (lm_logits,) + transformer_outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+            cross_attentions=transformer_outputs.cross_attentions,
         )
 
     def forward(self,embedding, x):

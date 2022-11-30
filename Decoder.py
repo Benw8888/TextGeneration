@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import os
 import pytorch_lightning as pl
-from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast, GPT2Attention, GPT2MLP
 from typing import Optional, Tuple, Union
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -66,18 +66,18 @@ class Decoder(pl.LightningModule):
     """
     Try to make an LSTM encoder
     """
-    def __init__(self, embedding_size = 768, level="paragraph"):
+    def __init__(self, config, embedding_size = 768, layer_idx = None, level="paragraph"):
         super().__init__()
         cache_dir = "aitextgen"
         #config = os.path.join(cache_dir, f"config_{tf_gpt2}.json")
         #self.model = GPT2LMHeadModel.from_pretrained(model, config=config)
-
         self.embedding_size = 768
+        self.inner_dim = config.n_inner if config.n_inner is not None else 4 * (768+self.embedding_size)
         self.model = AutoModelForCausalLM.from_pretrained(
                 "gpt2", cache_dir=cache_dir
             )
+        self.layer_idx = layer_idx
         # still of type GPT2LMHeadModel
-
 
         print("using gpt2 model of type: ",type(self.model).__name__)
         self.modify_gpt2()
@@ -97,11 +97,13 @@ class Decoder(pl.LightningModule):
         block = block_list[0]
         block.ln_1 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
 
-            # Now we need to update block.attn and block.ln_2; also might have to deal with the layer_past stuff (may cause problems?)
-
-            # DANIEL DO THIS ^ Also read modeling_gpt2.GPT2Attention's code
-
-
+        # Now we need to update block.attn and block.ln_2; also might have to deal with the layer_past stuff (may cause problems?)
+        block.attn = GPT2Attention(config,layer_idx=self.layer_idx)
+        self.ln_2 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+        if config.add_cross_attention:
+            self.crossattention = GPT2Attention(config, is_cross_attention=True, layer_idx=self.layer_idx)
+            self.ln_cross_attn = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+        self.mlp = GPT2MLP(self.inner_dim, config)
 
         # Now, overwrite forward methods
         self.model.transformer.forward = self.overwrite_gpt2_forward

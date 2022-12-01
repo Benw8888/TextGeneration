@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import os
 import pytorch_lightning as pl
-from transformers import GPT2LMHeadModel, GPT2TokenizerFast, GPT2Attention, GPT2MLP
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from typing import Optional, Tuple, Union
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -66,7 +66,7 @@ class Decoder(pl.LightningModule):
     """
     Try to make an LSTM encoder
     """
-    def __init__(self, config, embedding_size = 768, layer_idx = None, level="paragraph"):
+    def __init__(self, embedding_size = 768, level="paragraph"):
         super().__init__()
         cache_dir = "aitextgen"
         #config = os.path.join(cache_dir, f"config_{tf_gpt2}.json")
@@ -78,7 +78,14 @@ class Decoder(pl.LightningModule):
             )
         self.layer_idx = layer_idx
         # still of type GPT2LMHeadModel
-
+        # First, expand weights
+        # expand hidden size from 768 to 768+self.embedding_size
+        self.block_list = self.model.transformer.h
+        self.block = self.block_list[0]
+        self.block.ln_1 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+        self.block.ln_2 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+        if config.add_cross_attention:
+            self.block.ln_cross_atn = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
         print("using gpt2 model of type: ",type(self.model).__name__)
         self.modify_gpt2()
 
@@ -88,26 +95,73 @@ class Decoder(pl.LightningModule):
         """
         Modifies gpt2 to take in expanded input that is concatenated by paragraph embedding
         """
-
-        # First, expand weights
-        # expand hidden size from 768 to 768+self.embedding_size
-
-        # We just change first block for now:
-        block_list = self.model.transformer.h
-        block = block_list[0]
-        block.ln_1 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
-
         # Now we need to update block.attn and block.ln_2; also might have to deal with the layer_past stuff (may cause problems?)
-        block.attn = GPT2Attention(config,layer_idx=self.layer_idx)
-        self.ln_2 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
-        if config.add_cross_attention:
-            self.crossattention = GPT2Attention(config, is_cross_attention=True, layer_idx=self.layer_idx)
-            self.ln_cross_attn = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
-        self.mlp = GPT2MLP(self.inner_dim, config)
+        self.model.block.forward = self.overwrite_block_forward
 
         # Now, overwrite forward methods
         self.model.transformer.forward = self.overwrite_gpt2_forward
         self.model.forward = self.overwrite_gpt2lmhead_forward
+
+    def overwrite_block_forward(self,
+        hidden_states,
+        layer_past=None,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        use_cache=False,
+        output_attentions=False,):
+
+        residual = hidden_states
+        hidden_states = self.block.ln_1(hidden_states)
+        attn_outputs = self.block.attn(
+            hidden_states,
+            layer_past=layer_past,
+            attention_mask=attention_mask,
+            head_mask=head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+        )
+        attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
+        outputs = attn_outputs[1:]
+        # residual connection
+        hidden_states = attn_output + residual
+
+        if encoder_hidden_states is not None:
+            # add one self-attention block for cross-attention
+            if not hasattr(self, "crossattention"):
+                raise ValueError(
+                    f"If `encoder_hidden_states` are passed, {self} has to be instantiated with "
+                    "cross-attention layers by setting `config.add_cross_attention=True`"
+                )
+            residual = hidden_states
+            hidden_states = self.block.ln_cross_attn(hidden_states)
+            cross_attn_outputs = self.block.crossattention(
+                hidden_states,
+                attention_mask=attention_mask,
+                head_mask=head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                output_attentions=output_attentions,
+            )
+            attn_output = cross_attn_outputs[0]
+            # residual connection
+            hidden_states = residual + attn_output
+            outputs = outputs + cross_attn_outputs[2:]  # add cross attentions if we output attention weights
+
+        residual = hidden_states
+        hidden_states = self.block.ln_2(hidden_states)
+        feed_forward_hidden_states = self.block.mlp(hidden_states)
+        # residual connection
+        hidden_states = residual + feed_forward_hidden_states
+
+        if use_cache:
+            outputs = (hidden_states,) + outputs
+        else:
+            outputs = (hidden_states,) + outputs[1:]
+
+        return outputs  # hidden_states, present, (attentions, cross_attentions)
+
 
     def overwrite_gpt2_forward(
         self,

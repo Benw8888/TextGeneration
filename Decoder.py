@@ -45,6 +45,7 @@ config, kwargs = AutoConfig.from_pretrained(
             )
 #print(config)
 print("config cross attention", config.add_cross_attention)
+print("config inner",config.n_inner )
 #print(config.hidden_size)  # hidden size is 768
 
 
@@ -80,16 +81,13 @@ class Decoder(pl.LightningModule):
             cache_dir="aitextgen",
         )
 
-        self.embedding_size = 768  # Size of chunk embedding. MAKE SURE DIVISIBLE BY 12
+        self.embedding_size = embedding_size  # Size of chunk embedding. MAKE SURE DIVISIBLE BY 12
         self.inner_dim = config.n_inner if config.n_inner is not None else 4 * (768+self.embedding_size)
         self.model = AutoModelForCausalLM.from_pretrained(
                 "gpt2", cache_dir=cache_dir
             )
-        #self.layer_idx = layer_idx
-
         # still of type GPT2LMHeadModel
         
-
         print("using gpt2 model of type: ",type(self.model).__name__)
 
         self.modify_gpt2()
@@ -115,7 +113,7 @@ class Decoder(pl.LightningModule):
         # CHANGE ATTENTION
 
         # NOTE: make sure attn mask is 0 or -10000
-        attn = self.block
+        attn = self.block.attn
 
         c_attn = attn.c_attn
         columns = [] # the columns of c_attn
@@ -127,17 +125,17 @@ class Decoder(pl.LightningModule):
             for attn_head in range(12):
                 # column range from attn_type*768+attn_head * 64
                 attn_head_start_column = attn_type*768+attn_head * 64
-                columns.append(c_attn.weight[:, attn_head_start_column : attn_head_start_column + 64])  # copy parts of c_attn
-                columns.append(torch.zeros(768, 64))
+                columns.append(c_attn.weight[:, attn_head_start_column : attn_head_start_column + self.embedding_size/12])  # copy parts of c_attn
+                columns.append(torch.zeros(768, self.embedding_size/12))
 
-                bias_chunks.append(c_attn.bias[attn_head_start_column: attn_head_start_column + 64])
-                bias_chunks.append(torch.zeros(64))
+                bias_chunks.append(c_attn.bias[attn_head_start_column: attn_head_start_column + self.embedding_size/12])
+                bias_chunks.append(torch.zeros(self.embedding_size/12))
 
         c_attn.weight = nn.Parameter(torch.concat(columns, dim=1))
         c_attn.bias = nn.Parameter(torch.concat(columns, dim=0))
 
         # EXPAND ROWS
-        c_attn.weight = nn.Parameter(torch.concat([c_attn.weight,torch.zeros(768, 6*768)], dim=0))
+        c_attn.weight = nn.Parameter(torch.concat([c_attn.weight,torch.zeros(self.embedding_size, 3*768+3*self.embedding_size)], dim=0))
 
         c_attn.nf = 3*(self.config.hidden_size+self.embedding_size)
 
@@ -147,7 +145,44 @@ class Decoder(pl.LightningModule):
         
         
         # CHANGE MLP
+        hidden_size = 768
+        mlp = self.block.mlp
+        inner_dim = 4 * hidden_size+ 4*self.embedding_size
+        current_c_fc_weight = mlp.c_fc.weight
+        #embed x 4*hidden_size
+        first_zeros_c_fc = torch.zeros(hidden_size, 4*self.embedding_size)
+        current_c_fc_weight = torch.cat([current_c_fc_weight,first_zeros_c_fc], dim=1)
+        #now hidden x (4*hidden_size + 4*embedding_size)
+        second_zeros_c_fc = torch.zeros(self.embedding_size, 4*self.embedding_size+4*hidden_size)
+        current_c_fc_weight = torch.cat([current_c_fc_weight,second_zeros_c_fc], dim = 0)
+        mlp.c_fc.weight = nn.Parameter(current_c_fc_weight)
+
+        current_c_fc_bias = mlp.c_fc.bias
+        zeros_c_fc_bias = torch.zeros(4*self.embedding_size)
+        current_c_fc_bias = torch.cat([current_c_fc_bias, zeros_c_fc_bias], dim=0)
+        mlp.c_fc.bias = nn.Parameter(current_c_fc_bias)
+
+
+        #proj:
+        current_c_proj_weight = mlp.c_proj.weight
+        #4*hidden_size x embed 
+        first_zeros_c_proj = torch.zeros(4*self.embedding_size, hidden_size)
+        current_c_proj_weight = torch.cat([current_c_proj_weight,first_zeros_c_proj], dim=1)
+        #now (4*hidden_size + 4*embedding_size) x hidden
+        second_zeros_c_proj = torch.zeros(4*self.embedding_size+4*hidden_size, self.embedding_size)
+        current_c_proj_weight = torch.cat([current_c_proj_weight,second_zeros_c_proj], dim = 0)
+        mlp.c_proj.weight = nn.Parameter(current_c_proj_weight)
+
+        current_c_proj_bias = mlp.c_proj.bias
+        zeros_c_proj_bias = torch.zeros(hidden_size)
+        current_c_proj_bias = torch.cat([current_c_proj_bias, zeros_c_proj_bias], dim=0)
+        mlp.c_proj.bias = nn.Parameter(current_c_proj_bias)
         
+
+
+
+
+
 
 
         # Now, overwrite forward methods
@@ -496,7 +531,3 @@ class Decoder(pl.LightningModule):
 
     def training_step(self, batch_inp, step_id):
         pass
-
-
-
-

@@ -43,8 +43,9 @@ config, kwargs = AutoConfig.from_pretrained(
                 trust_remote_code=False,
                 cache_dir="aitextgen",
             )
-print(config)
-print(config.hidden_size)  # hidden size is 768
+#print(config)
+print("config cross attention", config.add_cross_attention)
+#print(config.hidden_size)  # hidden size is 768
 
 
 logger = logging.get_logger(__name__)
@@ -71,12 +72,21 @@ class Decoder(pl.LightningModule):
         cache_dir = "aitextgen"
         #config = os.path.join(cache_dir, f"config_{tf_gpt2}.json")
         #self.model = GPT2LMHeadModel.from_pretrained(model, config=config)
-        self.embedding_size = 768
+
+        self.config, self.kwargs = AutoConfig.from_pretrained(
+            "gpt2",
+            return_unused_kwargs=True,
+            trust_remote_code=False,
+            cache_dir="aitextgen",
+        )
+
+        self.embedding_size = 768  # Size of chunk embedding. MAKE SURE DIVISIBLE BY 12
         self.inner_dim = config.n_inner if config.n_inner is not None else 4 * (768+self.embedding_size)
         self.model = AutoModelForCausalLM.from_pretrained(
                 "gpt2", cache_dir=cache_dir
             )
-        self.layer_idx = layer_idx
+        #self.layer_idx = layer_idx
+
         # still of type GPT2LMHeadModel
         # First, expand weights
         # expand hidden size from 768 to 768+self.embedding_size
@@ -84,9 +94,9 @@ class Decoder(pl.LightningModule):
         self.block = self.block_list[0]
         self.block.ln_1 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
         self.block.ln_2 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
-        if config.add_cross_attention:
-            self.block.ln_cross_atn = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+
         print("using gpt2 model of type: ",type(self.model).__name__)
+
         self.modify_gpt2()
 
         # create custom modified GPT2LMHeadModel
@@ -95,8 +105,21 @@ class Decoder(pl.LightningModule):
         """
         Modifies gpt2 to take in expanded input that is concatenated by paragraph embedding
         """
-        # Now we need to update block.attn and block.ln_2; also might have to deal with the layer_past stuff (may cause problems?)
-        self.model.block.forward = self.overwrite_block_forward
+        # Now we need to update block.attn and block.ln_2 and block.mlp; also might have to deal with the layer_past stuff (may cause problems?)
+        # un-expand in the block.mlp
+        #self.block.forward = self.overwrite_block_forward
+
+        # NOTE: make sure attn mask is 0 or -10000
+        attn = self.block
+
+        c_attn = attn.c_attn
+        # is of the form torch.empty(1, 3)
+
+        attn.embed_dim = self.config.hidden_size+self.embedding_size
+        attn.head_dim = attn.embed_dim // attn.num_heads
+        attn.split_size = attn.embed_dim
+
+
 
         # Now, overwrite forward methods
         self.model.transformer.forward = self.overwrite_gpt2_forward

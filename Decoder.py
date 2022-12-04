@@ -88,12 +88,7 @@ class Decoder(pl.LightningModule):
         #self.layer_idx = layer_idx
 
         # still of type GPT2LMHeadModel
-        # First, expand weights
-        # expand hidden size from 768 to 768+self.embedding_size
-        self.block_list = self.model.transformer.h
-        self.block = self.block_list[0]
-        self.block.ln_1 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
-        self.block.ln_2 = nn.LayerNorm(768+self.embedding_size, eps=1e-05)
+        
 
         print("using gpt2 model of type: ",type(self.model).__name__)
 
@@ -109,16 +104,50 @@ class Decoder(pl.LightningModule):
         # un-expand in the block.mlp
         #self.block.forward = self.overwrite_block_forward
 
+        # First, expand weights
+        # expand hidden size from 768 to 768+self.embedding_size
+        self.block_list = self.model.transformer.h
+        self.block = self.block_list[0]
+        self.block.ln_1 = nn.LayerNorm(768 + self.embedding_size, eps=1e-05)
+        self.block.ln_2 = nn.LayerNorm(768 + self.embedding_size, eps=1e-05)
+        
+        
+        # CHANGE ATTENTION
+
         # NOTE: make sure attn mask is 0 or -10000
         attn = self.block
 
         c_attn = attn.c_attn
-        # is of the form torch.empty(1, 3)
+        columns = [] # the columns of c_attn
+        bias_chunks = []
+
+        # change attn weight and bias
+        # EXPAND COLUMNS
+        for attn_type in range(3): # query, key, value
+            for attn_head in range(12):
+                # column range from attn_type*768+attn_head * 64
+                attn_head_start_column = attn_type*768+attn_head * 64
+                columns.append(c_attn.weight[:, attn_head_start_column : attn_head_start_column + 64])  # copy parts of c_attn
+                columns.append(torch.zeros(768, 64))
+
+                bias_chunks.append(c_attn.bias[attn_head_start_column: attn_head_start_column + 64])
+                bias_chunks.append(torch.zeros(64))
+
+        c_attn.weight = nn.Parameter(torch.concat(columns, dim=1))
+        c_attn.bias = nn.Parameter(torch.concat(columns, dim=0))
+
+        # EXPAND ROWS
+        c_attn.weight = nn.Parameter(torch.concat([c_attn.weight,torch.zeros(768, 6*768)], dim=0))
+
+        c_attn.nf = 3*(self.config.hidden_size+self.embedding_size)
 
         attn.embed_dim = self.config.hidden_size+self.embedding_size
         attn.head_dim = attn.embed_dim // attn.num_heads
         attn.split_size = attn.embed_dim
-
+        
+        
+        # CHANGE MLP
+        
 
 
         # Now, overwrite forward methods

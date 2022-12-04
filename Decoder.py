@@ -37,16 +37,16 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 # Implement gpt2 decoder conditioned on paragraph embedding
 
-config, kwargs = AutoConfig.from_pretrained(
-                "gpt2",
-                return_unused_kwargs=True,
-                trust_remote_code=False,
-                cache_dir="aitextgen",
-            )
+# config, kwargs = AutoConfig.from_pretrained(
+#                 "gpt2",
+#                 return_unused_kwargs=True,
+#                 trust_remote_code=False,
+#                 cache_dir="aitextgen",
+#             )
 #print(config)
-print("config cross attention", config.add_cross_attention)
-print("config inner",config.n_inner )
-#print(config.hidden_size)  # hidden size is 768
+#print("config cross attention", config.add_cross_attention)
+#print("config inner",config.n_inner )
+##print(config.hidden_size)  # hidden size is 768
 
 
 logger = logging.get_logger(__name__)
@@ -68,11 +68,16 @@ class Decoder(pl.LightningModule):
     """
     Try to make an LSTM encoder
     """
-    def __init__(self, embedding_size = 768, level="paragraph"):
+    def __init__(self, embedding_size = 768, file_path=None,level="paragraph"):
         super().__init__()
         cache_dir = "aitextgen"
         #config = os.path.join(cache_dir, f"config_{tf_gpt2}.json")
-        #self.model = GPT2LMHeadModel.from_pretrained(model, config=config)
+        if file_path is not None:
+            self.model = self.load_model(file_path)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                "gpt2", cache_dir=cache_dir
+            )
 
         self.config, self.kwargs = AutoConfig.from_pretrained(
             "gpt2",
@@ -82,10 +87,7 @@ class Decoder(pl.LightningModule):
         )
 
         self.embedding_size = embedding_size  # Size of chunk embedding. MAKE SURE DIVISIBLE BY 12
-        self.inner_dim = config.n_inner if config.n_inner is not None else 4 * (768+self.embedding_size)
-        self.model = AutoModelForCausalLM.from_pretrained(
-                "gpt2", cache_dir=cache_dir
-            )
+
         # still of type GPT2LMHeadModel
         
         print("using gpt2 model of type: ",type(self.model).__name__)
@@ -93,6 +95,22 @@ class Decoder(pl.LightningModule):
         self.modify_gpt2()
 
         # create custom modified GPT2LMHeadModel
+
+    def load_model(self, model_folder):
+        # A folder is provided containing pytorch_model.bin and config.json
+        assert os.path.exists(
+            os.path.join(model_folder, "pytorch_model.bin")
+        ), f"There is no pytorch_model.bin in /{model_folder}."
+        assert os.path.exists(
+            os.path.join(model_folder, "config.json")
+        ), f"There is no config.json in /{model_folder}."
+
+        logger.info(
+            f"Loading model from provided weights and config in /{model_folder}."
+        )
+        return AutoModelForCausalLM.from_pretrained(
+            model_folder, local_files_only=True
+        )
 
     def modify_gpt2(self):
         """
@@ -106,8 +124,19 @@ class Decoder(pl.LightningModule):
         # expand hidden size from 768 to 768+self.embedding_size
         self.block_list = self.model.transformer.h
         self.block = self.block_list[0]
-        self.block.ln_1 = nn.LayerNorm(768 + self.embedding_size, eps=1e-05)
-        self.block.ln_2 = nn.LayerNorm(768 + self.embedding_size, eps=1e-05)
+        #self.block.ln_1 #= nn.LayerNorm(768 + self.embedding_size, eps=self.config.layer_norm_epsilon)
+
+        ln_1 = self.block.ln_1
+        ln_1.normalized_shape = (ln_1.normalized_shape[0]+self.embedding_size,)
+        ln_1.weight = nn.Parameter(torch.concat([ln_1.weight,torch.ones(self.embedding_size)],dim=0))
+        ln_1.bias = nn.Parameter(torch.concat([ln_1.bias, torch.zeros(self.embedding_size)], dim=0))
+
+        #self.block.ln_2 #= nn.LayerNorm(768 + self.embedding_size, eps=self.config.layer_norm_epsilon)
+
+        ln_2 = self.block.ln_2
+        ln_2.normalized_shape = (ln_2.normalized_shape[0]+self.embedding_size,)
+        ln_2.weight = nn.Parameter(torch.concat([ln_2.weight, torch.ones(self.embedding_size)], dim=0))
+        ln_2.bias = nn.Parameter(torch.concat([ln_2.bias, torch.zeros(self.embedding_size)], dim=0))
         
         
         # CHANGE ATTENTION
@@ -125,14 +154,14 @@ class Decoder(pl.LightningModule):
             for attn_head in range(12):
                 # column range from attn_type*768+attn_head * 64
                 attn_head_start_column = attn_type*768+attn_head * 64
-                columns.append(c_attn.weight[:, attn_head_start_column : attn_head_start_column + self.embedding_size/12])  # copy parts of c_attn
-                columns.append(torch.zeros(768, self.embedding_size/12))
+                columns.append(c_attn.weight[:, attn_head_start_column : attn_head_start_column + int(self.embedding_size/12)])  # copy parts of c_attn
+                columns.append(torch.zeros(768, int(self.embedding_size/12)))
 
-                bias_chunks.append(c_attn.bias[attn_head_start_column: attn_head_start_column + self.embedding_size/12])
-                bias_chunks.append(torch.zeros(self.embedding_size/12))
+                bias_chunks.append(c_attn.bias[attn_head_start_column: attn_head_start_column + int(self.embedding_size/12)])
+                bias_chunks.append(torch.zeros(int(self.embedding_size/12)))
 
         c_attn.weight = nn.Parameter(torch.concat(columns, dim=1))
-        c_attn.bias = nn.Parameter(torch.concat(columns, dim=0))
+        c_attn.bias = nn.Parameter(torch.concat(bias_chunks, dim=0))
 
         # EXPAND ROWS
         c_attn.weight = nn.Parameter(torch.concat([c_attn.weight,torch.zeros(self.embedding_size, 3*768+3*self.embedding_size)], dim=0))
@@ -142,12 +171,21 @@ class Decoder(pl.LightningModule):
         attn.embed_dim = self.config.hidden_size+self.embedding_size
         attn.head_dim = attn.embed_dim // attn.num_heads
         attn.split_size = attn.embed_dim
+
+        # Attention Proj
+        attn_proj = self.block.attn.c_proj #= Conv1D(self.embed_dim, self.embed_dim)
+        attn_proj.weight = nn.Parameter(torch.concat([attn_proj.weight, torch.zeros((768,self.embedding_size))],dim=1))
+        attn_proj.weight = nn.Parameter(torch.concat([attn_proj.weight, torch.zeros((self.embedding_size, 768+self.embedding_size))], dim=0))
+        attn_proj.bias = nn.Parameter(torch.concat([attn_proj.bias, torch.zeros(self.embedding_size)], dim=0))
+        attn_proj.nf = attn_proj.nf + self.embedding_size
+
+
+
         
         
         # CHANGE MLP
         hidden_size = 768
         mlp = self.block.mlp
-        inner_dim = 4 * hidden_size+ 4*self.embedding_size
         current_c_fc_weight = mlp.c_fc.weight
         #embed x 4*hidden_size
         first_zeros_c_fc = torch.zeros(hidden_size, 4*self.embedding_size)
@@ -162,6 +200,8 @@ class Decoder(pl.LightningModule):
         current_c_fc_bias = torch.cat([current_c_fc_bias, zeros_c_fc_bias], dim=0)
         mlp.c_fc.bias = nn.Parameter(current_c_fc_bias)
 
+        mlp.c_fc.nf = mlp.c_fc.nf + 4*self.embedding_size
+
         #proj:
         current_c_proj_weight = mlp.c_proj.weight
         #4*hidden_size x embed 
@@ -170,15 +210,72 @@ class Decoder(pl.LightningModule):
         #now (4*hidden_size + 4*embedding_size) x hidden
         mlp.c_proj.weight = nn.Parameter(current_c_proj_weight)
 
-        current_c_proj_bias = mlp.c_proj.bias
-        zeros_c_proj_bias = torch.zeros(self.embedding_size)
-        current_c_proj_bias = torch.cat([current_c_proj_bias, zeros_c_proj_bias], dim=0)
-        mlp.c_proj.bias = nn.Parameter(current_c_proj_bias)
-
         # Now, overwrite forward methods
+        self.block.attn.forward = self.overwrite_attn_forward
         self.block.forward = self.overwrite_block_forward
         self.model.transformer.forward = self.overwrite_gpt2_forward
         self.model.forward = self.overwrite_gpt2lmhead_forward
+
+    def overwrite_attn_forward(
+        decoder,
+        hidden_states: Optional[Tuple[torch.FloatTensor]],
+        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
+    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
+
+        self = decoder.block.attn
+        if encoder_hidden_states is not None:
+            if not hasattr(self, "q_attn"):
+                raise ValueError(
+                    "If class is used as cross attention, the weights `q_attn` have to be defined. "
+                    "Please make sure to instantiate class with `GPT2Attention(..., is_cross_attention=True)`."
+                )
+
+            query = self.q_attn(hidden_states)
+            key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
+            attention_mask = encoder_attention_mask
+        else:
+            print("hidden states shape: ", hidden_states.shape)
+            print("c attn WEIGHT shape: ", self.c_attn.weight.shape)
+            print("c attn BIAS shape: ", self.c_attn.bias.shape)
+            x = hidden_states
+            print("HIDDEN STATES VIEW SHAPE: ",x.view(-1, x.size(-1)).shape)
+            print("qkv c_attn: ", self.c_attn(hidden_states).shape)
+            query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
+
+        query = self._split_heads(query, self.num_heads, self.head_dim)
+        key = self._split_heads(key, self.num_heads, self.head_dim)
+        value = self._split_heads(value, self.num_heads, self.head_dim)
+
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key = torch.cat((past_key, key), dim=-2)
+            value = torch.cat((past_value, value), dim=-2)
+
+        if use_cache is True:
+            present = (key, value)
+        else:
+            present = None
+
+        if self.reorder_and_upcast_attn:
+            attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
+        else:
+            attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+
+        attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
+        attn_output = self.c_proj(attn_output)
+        attn_output = self.resid_dropout(attn_output)
+
+        outputs = (attn_output, present)
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        return outputs  # a, present, (attentions)
 
     def overwrite_block_forward(self,
         hidden_states,
@@ -190,6 +287,7 @@ class Decoder(pl.LightningModule):
         use_cache=False,
         output_attentions=False,):
 
+        hidden_states = hidden_states.float()
         residual = hidden_states
         hidden_states = self.block.ln_1(hidden_states)
         attn_outputs = self.block.attn(
@@ -231,11 +329,10 @@ class Decoder(pl.LightningModule):
         hidden_states = self.block.ln_2(hidden_states)
         feed_forward_hidden_states = self.block.mlp(hidden_states)
 
-        assert(len(dimensions))==3
-        dimensions = feed_forward_hidden_states.size():
+        dimensions = feed_forward_hidden_states.size()
+        assert(len(dimensions)==3)
         residual = residual[:dimensions[0], :dimensions[1], :dimensions[2]]
 
-        residual = residual[]
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
 
@@ -248,7 +345,7 @@ class Decoder(pl.LightningModule):
 
 
     def overwrite_gpt2_forward(
-        self,
+        decoder,
         paragraph_embedding = None,
         input_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
@@ -264,6 +361,8 @@ class Decoder(pl.LightningModule):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
+        self = decoder.model.transformer
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -340,10 +439,13 @@ class Decoder(pl.LightningModule):
             inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
         print("INPUTs EMBEDS SHAPE: ", inputs_embeds.shape)
-        hidden_states = torch.cat((inputs_embeds + position_embeds, paragraph_embedding), dim=-2)
+        output_shape_compressed= input_shape + (inputs_embeds.size(-1),)
 
-        #CONCATENATE THE EMBEDDING ONTO THE END!!!!!
-        #hidden_states = hidden_states
+        # CONCATENATE PARAGRAPH EMBEDDINGS TO INPUTS
+        necessary_repeating = inputs_embeds.shape[1]
+        hidden_states = torch.cat((inputs_embeds + position_embeds,
+                                   paragraph_embedding.unsqueeze(1).repeat(1, necessary_repeating, 1)), dim=-1)
+
 
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
@@ -351,13 +453,17 @@ class Decoder(pl.LightningModule):
 
         hidden_states = self.drop(hidden_states)
 
-        output_shape = input_shape + (hidden_states.size(-1),)
+        output_shape_expanded = input_shape + (hidden_states.size(-1),)
 
         presents = () if use_cache else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
         all_hidden_states = () if output_hidden_states else None
         for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
+            if i==0:
+                output_shape = output_shape_expanded
+            else:
+                output_shape = output_shape_compressed
 
             # Model parallel
             if self.model_parallel:
@@ -447,7 +553,7 @@ class Decoder(pl.LightningModule):
         )
 
     def overwrite_gpt2lmhead_forward(
-        self,
+        decoder,
         input_ids: Optional[torch.LongTensor] = None,
         conditioned_on = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
@@ -470,6 +576,7 @@ class Decoder(pl.LightningModule):
             `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
             are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
         """
+        self = decoder.model
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         transformer_outputs = self.transformer(
@@ -520,6 +627,7 @@ class Decoder(pl.LightningModule):
         )
 
     def forward(self,embedding, x):
+        #return self.model(input_ids= x, labels=x)
         return self.model(input_ids= x, labels=x, conditioned_on=embedding)
 
     def configure_optimizers(self):

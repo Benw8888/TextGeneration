@@ -162,30 +162,21 @@ class Decoder(pl.LightningModule):
         current_c_fc_bias = torch.cat([current_c_fc_bias, zeros_c_fc_bias], dim=0)
         mlp.c_fc.bias = nn.Parameter(current_c_fc_bias)
 
-
         #proj:
         current_c_proj_weight = mlp.c_proj.weight
         #4*hidden_size x embed 
         first_zeros_c_proj = torch.zeros(4*self.embedding_size, hidden_size)
-        current_c_proj_weight = torch.cat([current_c_proj_weight,first_zeros_c_proj], dim=1)
+        current_c_proj_weight = torch.cat([current_c_proj_weight,first_zeros_c_proj], dim=0)
         #now (4*hidden_size + 4*embedding_size) x hidden
-        second_zeros_c_proj = torch.zeros(4*self.embedding_size+4*hidden_size, self.embedding_size)
-        current_c_proj_weight = torch.cat([current_c_proj_weight,second_zeros_c_proj], dim = 0)
         mlp.c_proj.weight = nn.Parameter(current_c_proj_weight)
 
         current_c_proj_bias = mlp.c_proj.bias
-        zeros_c_proj_bias = torch.zeros(hidden_size)
+        zeros_c_proj_bias = torch.zeros(self.embedding_size)
         current_c_proj_bias = torch.cat([current_c_proj_bias, zeros_c_proj_bias], dim=0)
         mlp.c_proj.bias = nn.Parameter(current_c_proj_bias)
-        
-
-
-
-
-
-
 
         # Now, overwrite forward methods
+        self.block.forward = self.overwrite_block_forward
         self.model.transformer.forward = self.overwrite_gpt2_forward
         self.model.forward = self.overwrite_gpt2lmhead_forward
 
@@ -239,6 +230,12 @@ class Decoder(pl.LightningModule):
         residual = hidden_states
         hidden_states = self.block.ln_2(hidden_states)
         feed_forward_hidden_states = self.block.mlp(hidden_states)
+
+        assert(len(dimensions))==3
+        dimensions = feed_forward_hidden_states.size():
+        residual = residual[:dimensions[0], :dimensions[1], :dimensions[2]]
+
+        residual = residual[]
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
 

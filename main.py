@@ -141,19 +141,31 @@ if __name__ == '__main__':
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        #train_data is array of 9000/batch_size batches, each batch is array of shape batch_size, 2, num_paragraphs + 2 (start and end), dim_model
+        #train_data is array of 9000/batch_size batches, each batch is array of shape batch_size, 2, num_paragraphs (no start and end), dim_model
         #dim_model is dimension of our paragraph embedding
-        train_data = generatortrain.generate_random_data(9000, dim_model)
-        val_data = generatortrain.generate_random_data(3000, dim_model)
+        train_data = generatortrain.generate_unpadded_data(9000, dim_model)
+        val_data = generatortrain.generate_unpadded_data(3000, dim_model)
 
         train_dataloader = generatortrain.batchify_data(train_data)
         val_dataloader = generatortrain.batchify_data(val_data)
 
         model = generator.Generator(dim_model=dim_model, num_heads=2, num_encoder_layers=3, num_decoder_layers=3, dropout_p=0.1).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss_fn = nn.MSELoss()
+        loss_fn = nn.MSELoss(reduction='none')
 
         train_loss_list, validation_loss_list = generatortrain.fit(model, opt, loss_fn, train_dataloader, val_dataloader, 2)
+
+        model.eval()
+        example = generatortrain.generate_unpadded_data(5, dim_model)[3]
+        X, y = torch.Tensor(np.array([example[0]])).to(device), torch.Tensor(np.array([example[1]])).to(device)
+        y_input = y[:, :-1]
+        y_expected = y[:, 1:]
+
+        tgt_mask = model.get_tgt_mask(y_input.size(1)).to(device)
+        pad_mask = model.create_pad_mask(X[:, :, 0], -1)
+        pred = model(X, y_input, tgt_mask, src_pad_mask=pad_mask, tgt_pad_mask=pad_mask[:, :-1])
+        print(X, y_input)
+        print(y_expected, pred)
 
     #file_name = "fanfics.csv_text_files/94746.txt"
     #new_story = TokenDataset(file_name, tokenizer=tokenizer, padding_side="left")

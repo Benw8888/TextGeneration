@@ -38,11 +38,23 @@ class StoryJudger(nn.Module):
         self.lstm = nn.LSTM(paragraph_dim, hidden_dim, num_layers=2, bidirectional=True, dtype=torch.float64, batch_first=True)
         self.linear = nn.Linear(2*hidden_dim, 1, dtype=torch.float64)
 
+    def forward(self, data):
+        # data is batch by paragraphs by token ids, assume batch=1
 
-    def forward(self, x):
-        paragraph_embeddings = self.encoder(x)
-        pre_output, _ = self.lstm(paragraph_embeddings)
+        # encoder needs pbatch by token ids, so we reshape: (treat each paragraph in a story as a separate batch)
+        encoder_input = data[0,:,:]
+        paragraph_embeddings = self.encoder(encoder_input)
+
+        # re add the 1 dummy batch size dimension
+        batched_paragraph_embeddings = paragraph_embeddings[None,:,:]
+
+        pre_output, _ = self.lstm(batched_paragraph_embeddings)
         return self.linear(pre_output[:, -1])
+
+    def save_pretrained(self, target_folder=None):
+        """Saves the model into the specified directory."""
+        print("SAVING BASED ON: ", target_folder)
+        torch.save(self.state_dict(), target_folder)
 
 class StoryJudger2(nn.Module):
     """

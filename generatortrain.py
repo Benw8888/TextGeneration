@@ -5,9 +5,12 @@ import random
 import torch
 from torch import nn, Tensor
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import Encoder
+import torch.utils.data
 
 
-def train_loop(model, opt, loss_fn, dataloader, device=None):
+def train_loop(model, opt, loss_fn, dataloader, pad=True, pad_token=-1,
+               device=None):  # loss_fn has reduction = 'None' iff pad=True
     """
     Method from "A detailed guide to Pytorch's nn.Transformer() module.", by
     Daniel Melchor: https://medium.com/@danielmelchor/a-detailed-guide-to-pytorchs-nn-transformer-module-c80afbc9ffb1
@@ -31,12 +34,20 @@ def train_loop(model, opt, loss_fn, dataloader, device=None):
         sequence_length = y_input.size(1)
         tgt_mask = model.get_tgt_mask(sequence_length).to(device)
 
-        # Standard training except we pass in y_input and tgt_mask
-        pred = model(X, y_input, tgt_mask)
+        pad_mask = None
+        if pad:
+            pad_mask = model.create_pad_mask(X[:, :, 0], pad_token)
 
-        # Permute pred to have batch size first again
-        pred = pred.permute(1, 0, 2)
-        loss = loss_fn(pred, y_expected)
+        # Standard training except we pass in y_input and tgt_mask
+        pred = model(X, y_input, tgt_mask, src_pad_mask=pad_mask, tgt_pad_mask=pad_mask[:, :-1])
+
+        if pad:
+            not_pad_mask = ~pad_mask[:, 1:, None]
+            loss_matrix = loss_fn(pred, y_expected)
+            loss_masked = loss_matrix * not_pad_mask
+            loss = loss_masked.sum() / not_pad_mask.sum()
+        else:
+            loss = loss_fn(pred, y_expected)
 
         opt.zero_grad()
         loss.backward()
@@ -47,7 +58,7 @@ def train_loop(model, opt, loss_fn, dataloader, device=None):
     return total_loss / len(dataloader)
 
 
-def validation_loop(model, loss_fn, dataloader, device=None):
+def validation_loop(model, loss_fn, dataloader, pad=True, pad_token=-1, device=None):
     """
     Method from "A detailed guide to Pytorch's nn.Transformer() module.", by
     Daniel Melchor: https://medium.com/@danielmelchor/a-detailed-guide-to-pytorchs-nn-transformer-module-c80afbc9ffb1
@@ -71,13 +82,20 @@ def validation_loop(model, loss_fn, dataloader, device=None):
             # Get mask to mask out the next words
             sequence_length = y_input.size(1)
             tgt_mask = model.get_tgt_mask(sequence_length).to(device)
+            pad_mask = None
+            if pad:
+                pad_mask = model.create_pad_mask(X[:, :, 0], pad_token)
 
             # Standard training except we pass in y_input and src_mask
-            pred = model(X, y_input, tgt_mask)
+            pred = model(X, y_input, tgt_mask, src_pad_mask=pad_mask, tgt_pad_mask=pad_mask[:, :-1])
+            if pad:
+                not_pad_mask = ~pad_mask[:, 1:, None]
+                loss_matrix = loss_fn(pred, y_expected)
+                loss_masked = loss_matrix * not_pad_mask
+                loss = loss_masked.sum() / not_pad_mask.sum()
+            else:
+                loss = loss_fn(pred, y_expected)
 
-            # Permute pred to have batch size first again
-            pred = pred.permute(1, 0, 2)
-            loss = loss_fn(pred, y_expected)
             total_loss += loss.detach().item()
 
     return total_loss / len(dataloader)
@@ -110,31 +128,49 @@ def fit(model, opt, loss_fn, train_dataloader, val_dataloader, epochs):
 
 
 def generate_random_data(n, dim_model):
-    SOS_token = 2*np.ones((dim_model, 1))
-    EOS_token = 3*np.ones((dim_model, 1))
+    SOS_token = 2 * np.ones((1, dim_model))
+    EOS_token = 3 * np.ones((1, dim_model))
     length = 5
 
     data = []
 
     for i in range(n // 2):
-        X = np.concatenate((SOS_token, np.ones((dim_model, length)), EOS_token), axis = 1)
-        y = np.concatenate((SOS_token, np.ones((dim_model, length)), EOS_token), axis = 1)
-        data.append([X.T, y.T])
+        X = np.concatenate((SOS_token, np.ones((length, dim_model)), EOS_token), axis=0)
+        y = np.concatenate((SOS_token, np.ones((length, dim_model)), EOS_token), axis=0)
+        data.append([X, y])
 
-    # 0,0,0,0 -> 0,0,0,0
     for i in range(n // 2):
-        X = np.concatenate((SOS_token, np.zeros((dim_model, length)), EOS_token), axis = 1)
-        y = np.concatenate((SOS_token, np.zeros((dim_model, length)), EOS_token), axis = 1)
-        data.append([X.T, y.T])
-
-    # 1,0,1,0 -> 1,0,1,0,1
+        X = np.concatenate((SOS_token, np.zeros((length, dim_model)), EOS_token), axis=0)
+        y = np.concatenate((SOS_token, np.zeros((length, dim_model)), EOS_token), axis=0)
+        data.append([X, y])
 
     np.random.shuffle(data)
 
     return data
 
 
-def batchify_data(data, batch_size=16, padding=False, padding_token=-1):
+def generate_unpadded_data(n, dim_model, length=11, padding_token=-1):  # no start or end
+    data = []
+    for i in range(n // 2):
+        X = np.zeros((length, dim_model))
+        y = np.zeros((length, dim_model))
+        X[-1:, :] = padding_token
+        y[-1:, :] = padding_token
+        data.append([X, y])
+
+    for i in range(n // 2):
+        X = np.ones((length, dim_model))
+        y = np.ones((length, dim_model))
+        X[-3:, :] = padding_token
+        y[-3:, :] = padding_token
+        data.append([X, y])
+
+    np.random.shuffle(data)
+
+    return data
+
+
+def batchify_data(data, batch_size=16, padding=False, padding_token=-1):  # ideally batch_size divides data length
     batches = []
     for idx in range(0, len(data), batch_size):
         # We make sure we dont get the last bit if its not batch_size size
@@ -145,17 +181,39 @@ def batchify_data(data, batch_size=16, padding=False, padding_token=-1):
                 max_batch_length = 0
 
                 # Get longest sentence in batch
-                for seq in data[idx : idx + batch_size]:
+                for seq in data[idx: idx + batch_size]:
                     if len(seq) > max_batch_length:
                         max_batch_length = len(seq)
+                        print(len(seq))
 
                 # Append X padding tokens until it reaches the max length
                 for seq_idx in range(batch_size):
                     remaining_length = max_batch_length - len(data[idx + seq_idx])
                     data[idx + seq_idx] += [padding_token] * remaining_length
 
-            batches.append(np.array(data[idx : idx + batch_size]).astype(np.single))
+            batches.append(np.array(data[idx: idx + batch_size]).astype(np.single))
 
     print(f"{len(batches)} batches of size {batch_size} with shape {batches[0].shape}")
 
     return batches
+
+
+def encode_batch(book_list, encoder, max_par,
+                 device=None):  # every batch is a list of books, every book is a list of dictionaries
+    encoded_books = torch.zeros((len(book_list), max_par, encoder.output_dim))  # add encode.output_dim
+    # we need to make encoded_books be the pad instead of zeros everywhere that is not
+    for b, book in enumerate(book_list):
+        for p, paragraph in enumerate(book):
+            encoded_books[b, p, :] = encoder(paragraph)
+    return encoded_books
+
+
+def get_and_train_data(model, opt, loss_fn, dataloader, encoder, max_par, device=None):  # data is a list of book_lists
+    model.train()
+
+    if device == None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for i, sample in enumerate(dataloader):
+        batch = encode_batch(sample, encoder, max_par)
+

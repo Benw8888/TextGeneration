@@ -93,6 +93,7 @@ class Decoder(pl.LightningModule):
         print("using gpt2 model of type: ",type(self.model).__name__)
 
         self.modify_gpt2()
+        GPT2LMHeadModel
 
         # create custom modified GPT2LMHeadModel
 
@@ -108,7 +109,7 @@ class Decoder(pl.LightningModule):
         logger.info(
             f"Loading model from provided weights and config in /{model_folder}."
         )
-        return AutoModelForCausalLM.from_pretrained(
+        return self.model.from_pretrained(
             model_folder, local_files_only=True
         )
 
@@ -240,12 +241,7 @@ class Decoder(pl.LightningModule):
             key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
             attention_mask = encoder_attention_mask
         else:
-            print("hidden states shape: ", hidden_states.shape)
-            print("c attn WEIGHT shape: ", self.c_attn.weight.shape)
-            print("c attn BIAS shape: ", self.c_attn.bias.shape)
             x = hidden_states
-            print("HIDDEN STATES VIEW SHAPE: ",x.view(-1, x.size(-1)).shape)
-            print("qkv c_attn: ", self.c_attn(hidden_states).shape)
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
 
         query = self._split_heads(query, self.num_heads, self.head_dim)
@@ -438,7 +434,6 @@ class Decoder(pl.LightningModule):
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
-        print("INPUTs EMBEDS SHAPE: ", inputs_embeds.shape)
         output_shape_compressed= input_shape + (inputs_embeds.size(-1),)
 
         # CONCATENATE PARAGRAPH EMBEDDINGS TO INPUTS
@@ -636,3 +631,8 @@ class Decoder(pl.LightningModule):
 
     def training_step(self, batch_inp, step_id):
         pass
+
+    def save_pretrained(self, target_folder: str = os.getcwd()):
+        """Saves the model into the specified directory."""
+        print("SAVING DECODER TO: ", target_folder)
+        self.model.save_pretrained(target_folder)

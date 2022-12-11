@@ -48,6 +48,75 @@ class PositionalEncoding(nn.Module):
         # Residual connection + pos encoding
         return self.dropout(token_embedding + self.pos_encoding[:token_embedding.size(0), :])
 
+class TextGenerator(nn.Module):
+    def __init__(self, generator_file_path, decoder_file_path, size_input=30, device=None):
+        super().__init__()
+        self.config, self.kwargs = AutoConfig.from_pretrained(
+            "gpt2",
+            return_unused_kwargs=True,
+            trust_remote_code=False,
+            cache_dir="aitextgen",
+        )
+        self.device_to_use = device
+
+        self.decoder = Decoder.Decoder()
+        self.decoder.load_state_dict(torch.load(decoder_file_path))
+
+        self.generator = ChunkGPT(self.config, size_input)
+        self.generator.load_state_dict(torch.load(generator_file_path))
+
+        # INFO
+        self.size_input = size_input # max size of input for generator
+
+    def forward(self, x=None):
+        # Assume input of shape 1 x num_chunks x 768
+        if x is None:
+            shifted_input = self.create_start_vectors(1)
+        else:
+            shifted_input = torch.concat(
+                [self.create_start_vectors(1).to(self.device_to_use), x[:, :, :]],  # no need to cut off end of x this time
+                dim=1)
+        assert shifted_input.shape[1]<=self.size_input, f"size of text generator input greater than allowed, got: {shifted_input.shape[1]-1}"
+
+        chunk_vectors = self.generate_all_chunks(shifted_input)
+        print("chunk vectors: ",chunk_vectors)
+
+        # now expand each chunk vector into tokens/words
+
+
+
+        pass
+
+    def create_start_vectors(self, batch_size):
+        return torch.zeros((1, 1, 768))
+
+    def generate_all_chunks(self, shifted_input):
+        # do one step generation, return past value keys somehow
+        length = shifted_input.shape[1]
+        # need to get length to self.size_input; this includes the zero start vector
+        outputs = self.generator.forward(inputs_embeds=shifted_input, use_cache=True)
+        next_vector = outputs.last_hidden_state[:,-1:,:]
+        past_key_values = outputs.past_key_values
+        shifted_input = torch.concat(
+            [shifted_input, next_vector],
+            dim=1)
+        length += 1
+
+        while length < self.size_input:
+            outputs = self.generator.forward(inputs_embeds=next_vector, past_key_values=past_key_values, use_cache=True)
+            next_vector = outputs.last_hidden_state[:,-1:,:]
+            print("last hidden state shape: ", outputs.last_hidden_state.shape)
+            past_key_values = outputs.past_key_values
+            shifted_input = torch.concat(
+                [shifted_input, next_vector],
+                dim=1)
+            length +=1
+
+        return shifted_input[:,1:,:]
+        # for loop for the rest, feeding in (only one vector?) and past key values
+        pass
+
+
 
 class GeneratorTrainer(pl.LightningModule):
     """
@@ -56,7 +125,7 @@ class GeneratorTrainer(pl.LightningModule):
     """
 
     # Constructor
-    def __init__(self, dataset, hparams, encoder_file_path = None, generator_load_path=None,num_chunks=None,device=None):
+    def __init__(self, dataset, hparams, encoder_file_path = None, generator_load_path=None,num_chunks=30,device=None):
         super().__init__()
         self.device_to_use = device
 
